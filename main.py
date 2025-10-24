@@ -14,11 +14,11 @@ def home():
 @app.post("/classify")
 async def classify_audio(file: UploadFile = File(...)):
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            shutil.copyfileobj(file.file, tmp)
-            tmp_path = tmp.name
-
-        result = classifier.classify_audio(tmp_path)
+        temp_path = f"/tmp/{file.filename}"
+        with open(temp_path, "wb") as f:
+            f.write(await file.read())
+        
+        result = classifier.classify_audio(temp_path)
         return JSONResponse(result)
 
     except Exception as e:
