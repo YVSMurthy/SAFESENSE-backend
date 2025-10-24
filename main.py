@@ -2,8 +2,7 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import uvicorn
 from classification import classifier
-import tempfile
-import shutil
+import os
 
 app = FastAPI()
 
