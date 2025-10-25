@@ -1,17 +1,27 @@
 import numpy as np
-import tensorflow as tf
+import tensorflow.lite as tflite
 import librosa
 import json
 import pickle
 from vosk import Model, KaldiRecognizer
 from transformers import AutoTokenizer, AutoModel
 import torch
+import os
+from dotenv import load_dotenv
+import requests
+
+load_dotenv()
 
 class AudioTextClassifier:
-    def __init__(self, input_path="./models"):
-        self.interpreter_audio = tf.lite.Interpreter(model_path=f"{input_path}/audio_prediction_model.tflite")
+    def __init__(self, input_path, use_s3 = False, s3_url = None):
+        if use_s3:
+            if not s3_url:
+                raise ValueError("s3_url must be provided when use_s3=True")
+            self._download_models_from_s3(s3_url, input_path)
+
+        self.interpreter_audio = tflite.Interpreter(model_path=f"{input_path}/audio_prediction_model.tflite")
         self.interpreter_audio.allocate_tensors()
-        self.interpreter_text = tf.lite.Interpreter(model_path=f"{input_path}/text_prediction_model.tflite")
+        self.interpreter_text = tflite.Interpreter(model_path=f"{input_path}/text_prediction_model.tflite")
         self.interpreter_text.allocate_tensors()
 
         model_name = f"{input_path}/encoding_model"
@@ -35,6 +45,85 @@ class AudioTextClassifier:
         self.M = np.load(f"{input_path}/M_fusion.npy")
         self.b = np.load(f"{input_path}/b_fusion.npy")
     
+    def _download_models_from_s3(self, s3_base_url, local_path):
+        os.makedirs(local_path, exist_ok=True)
+        
+        files_to_download = [
+            "audio_prediction_model.tflite",
+            "text_prediction_model.tflite",
+            "label_encoder.pkl",
+            "M_fusion.npy",
+            "b_fusion.npy"
+        ]
+        
+        for filename in files_to_download:
+            local_file = os.path.join(local_path, filename)
+            if not os.path.exists(local_file):
+                url = f"{s3_base_url}/{filename}"
+                print(f"Downloading {filename}...")
+                self._download_file(url, local_file)
+        
+        encoding_model_path = os.path.join(local_path, "encoding_model")
+        os.makedirs(encoding_model_path, exist_ok=True)
+        
+        encoding_files = [
+            "config.json",
+            "model.safetensors",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+            "tokenizer.json",
+            "vocab.txt"
+        ]
+        
+        for filename in encoding_files:
+            local_file = os.path.join(encoding_model_path, filename)
+            if not os.path.exists(local_file):
+                url = f"{s3_base_url}/encoding_model/{filename}"
+                try:
+                    self._download_file(url, local_file)
+                except Exception as e:
+                    print(f"Note: {filename} not found (might be optional): {e}")
+        
+        vosk_model_path = os.path.join(local_path, "vosk_model", "vosk-model-small-en-us-0.15")
+        os.makedirs(vosk_model_path, exist_ok=True)
+        
+        vosk_files = [
+            "am/final.mdl",
+            "conf/mfcc.conf",
+            "conf/model.conf",
+            "graph/disambig_tid.int",
+            "graph/Gr.fst",
+            "graph/HCLG.fst",
+            "graph/phones/word_boundary.int",
+            "ivector/final.dubm",
+            "ivector/final.ie",
+            "ivector/final.mat",
+            "ivector/global_cmvn.stats",
+            "ivector/online_cmvn.conf",
+            "ivector/splice.conf"
+        ]
+        
+        for filename in vosk_files:
+            local_file = os.path.join(vosk_model_path, filename)
+            if not os.path.exists(local_file):
+                url = f"{s3_base_url}/vosk_model/vosk-model-small-en-us-0.15/{filename}"
+                os.makedirs(os.path.dirname(local_file), exist_ok=True)
+                try:
+                    self._download_file(url, local_file)
+                except Exception as e:
+                    print(f"Error downloading {filename}: {e}")
+    
+    def _download_file(self, url, local_path):
+        response = requests.get(url, stream=True, timeout=300)
+        response.raise_for_status()
+        
+        with open(local_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        print(f"  ✓ {os.path.basename(local_path)}")
+
     def _extract_features(self, file_path):
         y, sr = librosa.load(file_path, sr=self.SR)
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=self.N_MFCC)
@@ -101,7 +190,6 @@ class AudioTextClassifier:
     def _predict_text_prob(self, sentences):
         X_emb = self._encode_sentences(sentences).astype(np.float32)
         
-        # Use TFLite interpreter
         input_details = self.interpreter_text.get_input_details()
         output_details = self.interpreter_text.get_output_details()
         
@@ -172,4 +260,10 @@ class AudioTextClassifier:
             "predicted_severity_class": severity_class
         }
 
-classifier = AudioTextClassifier()
+IS_PRODUCTION = os.getenv("RENDER", False) or os.getenv("RAILWAY", False)
+
+if IS_PRODUCTION:
+    S3_URL = os.getenv("S3_URL", "")
+    classifier = AudioTextClassifier(input_path="/data/models", use_s3=True, s3_url=S3_URL)
+else:
+    classifier = AudioTextClassifier(input_path="./models")
